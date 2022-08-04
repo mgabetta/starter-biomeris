@@ -17,13 +17,14 @@ if ! [ -f "$LOCK_FILE" ]; then
 
 	if ! [ -d "$log_folder" ]; then
 		mkdir "$log_folder";
-
-		#log.txt
-		echo -n  $(date +"%x-%X") >> $general_log
-		echo " folder $log_folder created" >> $general_log
 	fi
 
 	if wget -T 20 -q "$URL" -P "$script_wd" > /dev/null; then
+	
+		#log.txt
+		echo -n  $(date +"%x-%X") >> $general_log
+		echo " folder $log_folder created" >> $general_log
+	
 
 		#log.txt
 		echo -n  $(date +"%x-%X") >> $general_log
@@ -50,7 +51,13 @@ if ! [ -f "$LOCK_FILE" ]; then
 	else
 		#log.txt
 		echo -n  $(date +"%x-%X") >> $general_log
-		echo " impossible to download file exec_1.R" >> $general_log
+		#echo " impossible to download file exec_1.R" >> $general_log
+		echo " NTD" >> $general_log
+		
+		rm -rf "$log_folder";
+		#echo -n  $(date +"%x-%X") >> $general_log
+		#echo " folder $log_folder deleted" >> $general_log
+		
 	fi
 
 	# even if there are errors this part of the script will be executed so 
