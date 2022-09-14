@@ -42,7 +42,6 @@ horizontal_data <- function(data_non_rep, data_rep){
         colnames(data_tmp) <- ifelse(grepl("\\d", colnames(data_tmp)), paste0(substring(colnames(data_tmp), first = 1, last = 1), "_",
                                                                               instance, "_",substring(colnames(data_tmp), first = 2)), 
                                      paste(instance, colnames(data_tmp), sep = "_"))
-        # colnames(data_tmp) <- paste(colnames(data_tmp), instance, sep = "_")
         data_id_hor <- cbind(data_id_hor, data_tmp)
       }
     }
@@ -332,10 +331,11 @@ write.csv(data_final, file_name, na = "", row.names = F)
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
 # Copy in /vantage6-starter_head_and_neck-user-vol/_data
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
+file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
 file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
             to = "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/default.csv")
 
-# Copy to $HOME/data
-system("mkdir -p $HOME/data")
-system("cp /var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/default.csv $HOME/data/default.csv")
+# Copy to /data
+system("VTG_DATA_DIR=/data; 
+       cp /var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/default.csv $VTG_DATA_DIR/default.csv;
+       chmod 766 $VTG_DATA_DIR/default.csv")

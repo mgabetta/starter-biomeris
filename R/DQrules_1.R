@@ -2615,11 +2615,7 @@ saveWorkbook(wb, file_name, overwrite = TRUE)
 # Copy in /data
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
-# Create folder if doesn't exist and copy report
-if (!(dir.exists("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")))
-  dir.create("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data", recursive = TRUE)
-
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
+file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
 file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-individual.xlsx"))
 
@@ -3088,6 +3084,6 @@ saveWorkbook(wb, file_name, overwrite = TRUE)
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
 # Copy in /vantage6-starter_head_and_neck-user-vol/_data
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
+file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
 file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-summary.xlsx"))
