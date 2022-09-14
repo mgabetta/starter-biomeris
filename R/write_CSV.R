@@ -390,17 +390,17 @@ data_final <- data_final %>%
 file_name <- paste0(properties$id_centro,'-',id_analysis,'-DATA-csv-', format(Sys.Date(), "%y%m%d"), '.csv')
 write.csv(data_final, file_name, na = "", row.names = F)
 
-# Copy in /data
+# Copy in /opt/redcap_dq/environment/data
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
-# Copy in /vantage6-starter_head_and_neck-user-vol/_data
-file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
-file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
-            to = "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/default.csv")
-
 # Copy to /data
+file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/data")
+file.rename(from = paste0("/data/", file_name), to = "/data/default.csv")
 system("VTG_DATA_DIR=/data; 
-       mkdir -p $VTG_DATA_DIR; 
-       chmod -R 777 $VTG_DATA_DIR; 
-       cp /var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/default.csv $VTG_DATA_DIR/default.csv;
        chmod 766 $VTG_DATA_DIR/default.csv")
+       
+# Copy in /vantage6-starter_head_and_neck-user-vol/_data
+system("datafile=\"/data/default.csv\"
+if [[ \"$( docker ps -q -f name=vantage6-starter_head_and_neck-user)\" && \"$( docker container inspect -f '{{.State.Status}}' vantage6-starter_head_and_neck-user )\" == \"running\" ]]; then
+      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data
+fi")
