@@ -155,7 +155,7 @@ file_name <- list.files(path = '../data', pattern = paste0(id_analysis, "-pset-c
 ps_ctrl <- read.csv(paste0('../data/',tail(file_name, n = 1)))
 
 # extract data from REDCap
-redcap_data_new <- redcap_read_oneshot(
+redcap_data_new <- redcap_read(
   redcap_uri = properties$uri,
   token = properties$token)$data
 
@@ -2613,12 +2613,17 @@ file_name <- paste0(properties$id_centro,'-',id_analysis,'-QC-individual-', form
 # save to xlsx
 saveWorkbook(wb, file_name, overwrite = TRUE)
 
-# Copy in /data
+# Copy in /opt/redcap_dq/environment/data
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
-file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
-file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
-            to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-individual.xlsx"))
+# file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
+# file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
+#             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-individual.xlsx"))
+# Copy in /vantage6-starter_head_and_neck-user-vol/_data
+system(paste0("datafile=\"/opt/redcap_dq/environment/data/", file_name,"\"
+if [[ \"$( docker ps -q -f name=vantage6-starter_head_and_neck-user)\" && \"$( docker container inspect -f '{{.State.Status}}' vantage6-starter_head_and_neck-user )\" == \"running\" ]]; then
+      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", ID_alg, "-QC-individual.xlsx
+fi"))
 
 ############################################## QC REPORT SUMMARY ##############################################
 # Missing and unknown ---------
@@ -3089,9 +3094,13 @@ saveWorkbook(wb, file_name, overwrite = TRUE)
 file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
 
 # Copy in /vantage6-starter_head_and_neck-user-vol/_data
-file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
-file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
-            to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-summary.xlsx"))
+# file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
+# file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
+#             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-summary.xlsx"))
+system(paste0("datafile=\"/opt/redcap_dq/environment/data/", file_name,"\"
+if [[ \"$( docker ps -q -f name=vantage6-starter_head_and_neck-user)\" && \"$( docker container inspect -f '{{.State.Status}}' vantage6-starter_head_and_neck-user )\" == \"running\" ]]; then
+      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", ID_alg, "-QC-summary.xlsx
+fi"))
 
 ############################################## PS- PASS ############################################## 
 # Salvo la lista dei pazienti che hanno passato i check in un csv (elimino tutti i pazienti che hanno almeno un check FAIL)

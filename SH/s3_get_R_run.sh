@@ -1,5 +1,5 @@
 #TODO decide if more than 1 file to be executed can be on the remote repo
-LOCK_FILE="/opt/redcap_dq/environment/PROCESS_LOCK_FILE"
+LOCK_FILE="/tmp/VANTAGE_PROCESS_LOCK_FILE"
 general_log="/opt/redcap_dq/environment/logs/log.txt"
 
 if ! [ -f "$LOCK_FILE" ]; then
