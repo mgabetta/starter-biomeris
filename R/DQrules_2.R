@@ -1,13 +1,23 @@
 ##### Data Quality HN Core Data Registry 2.0 #####
 
-# check ID algorithm
-ID_alg <- paste0("TEST", format(Sys.Date(), "%y%m%d"),"_2")
+# analysis id --------- CHANGE THE ANALYSIS ID HERE
+id_analysis <- "TEST"
+
+# run id ------ CHANGE THE RUN ID HERE
+run_id <- paste0("TEST_FULL", format(Sys.Date(), "%y%m%d"),"_2")
+
+# id_centro AIOCC
+id_aiocc <- 49
+
+#######################################################################################################################
+
+####### *********** DO NOT CHANGE THE UNDERLYING CODE *********** #######
 
 # Read list of script previously run
 file_scripts <- "/opt/redcap_dq/environment/logs/history.txt"
 list_of_scripts <- readtext::readtext(file_scripts)
 
-if (length(grep(ID_alg, list_of_scripts$text)) != 0) {
+if (length(grep(run_id, list_of_scripts$text)) != 0) {
   message("You have already run this script")
   opt <- options(show.error.messages=FALSE)
   on.exit(options(opt))
@@ -17,7 +27,7 @@ if (length(grep(ID_alg, list_of_scripts$text)) != 0) {
 ##### If not stopped run the code
 # Add this script to the list of scripts previously run
 sink(file_scripts, append = TRUE)
-cat(ID_alg, file = file_scripts, sep = "\n", append = TRUE)
+cat(run_id, file = file_scripts, sep = "\n", append = TRUE)
 sink()
 
 # load R packages
@@ -146,18 +156,42 @@ setwd('/opt/redcap_dq/environment/scripts')
 file_prop <- "../config/config.properties"
 properties <- properties::read.properties(file_prop)
 
-# analysis id
-id_analysis <- "TEST"
+if(substring(properties$uri, first = nchar(properties$uri), last = nchar(properties$uri)) != "/") {
+  properties$uri <- paste0(properties$uri, "/")
+}
 
 # read PS-CTRL file
 file_name <- list.files(path = '../data', pattern = paste0(id_analysis, "-pset-ctrl"))
-# ps_ctrl <- read.csv(paste0('../data/', file_name))
 ps_ctrl <- read.csv(paste0('../data/',tail(file_name, n = 1)))
+
+# get patients' ids filtered by tumor site
+pts_id <- redcap_read(
+  batch_size = 10L,
+  interbatch_delay = 0.5,
+  redcap_uri = properties$uri,
+  token = properties$token,
+  fields_collapsed = "a01_id, d11_siterare, d11_sitecomrar",
+  filter_logic = '([non_repeatable_arm_1][d11_siterare] < "6" AND [non_repeatable_arm_1][d11_siterare] <> "") OR ([non_repeatable_arm_1][d11_sitecomrar] < "11" AND [non_repeatable_arm_1][d11_sitecomrar] <> "")',
+  export_data_access_groups = TRUE
+)$data
+
+# get patients DAG
+if(properties$id_centro == id_aiocc) {
+  pt_dag <- pts_id %>%
+    select(a01_id, redcap_data_access_group)
+}
+
+pts_id <- pts_id$a01_id
 
 # extract data from REDCap
 redcap_data_new <- redcap_read(
+  batch_size = 10L,
+  interbatch_delay = 0.5,
   redcap_uri = properties$uri,
-  token = properties$token)$data
+  token = properties$token,
+  records_collapsed = paste(pts_id, collapse = ","),
+  export_data_access_groups = TRUE
+)$data
 
 # extract metadata from REDCap
 metadata <- redcap_metadata_read(
@@ -1190,15 +1224,21 @@ for (i in 1:nrow(metadata_tmp)) {
                                                     c07_systtype___2 == 1 ~ metadata$field_label[which(metadata$field_name == "c09_targetyear")],
                                                     c07_systtype___3 == 1 ~ metadata$field_label[which(metadata$field_name == "c10_immyear")]),
                                   metadata$field_label[which(metadata$field_name == "f34_1_enddate_syst")]),
-                    value2 = ifelse(i == 1, case_when(c07_systtype___1 == 1 ~ c08_chemoyear,
-                                                      c07_systtype___2 == 1 ~ c09_targetyear,
-                                                      c07_systtype___3 == 1 ~ c10_immyear),
-                                    get(paste0("f34_", i-1, "_enddate_syst"))),
+                    tmp = ifelse(i == 1, case_when(c07_systtype___1 == 1 ~ "c08_chemoyear",
+                                                   c07_systtype___2 == 1 ~ "c09_targetyear",
+                                                   c07_systtype___3 == 1 ~ "c10_immyear"),
+                                 "f34_1_enddate_syst"),
+                    value2 = get(tmp),
                     status = case_when(i == 1 ~ ifelse(value1 > value2, 'PASS','FAIL'),
-                                       i > 1 ~ ifelse(value1 >= value2, 'PASS','FAIL')))
+                                       i > 1 ~ ifelse(value1 >= value2, 'PASS','FAIL'))
+  )
   
   if(nrow(data_tmp) != 0)
     data_rule51 <- rbind.fill(data_rule51, data_tmp)
+}
+
+if(length(data_rule51)) {
+  data_rule51 <- select(data_rule51, -tmp)
 }
 
 ### Rule #52 --------------------------------------------------------------------
@@ -1226,28 +1266,6 @@ for (i in 1:nrow(metadata_tmp)) {
   
   if(nrow(data_tmp) != 0)
     data_rule52 <- rbind.fill(data_rule52, data_tmp)
-}
-
-### Rule #53 --------------------------------------------------------------------
-# if chemo or immuno  not neoadiuvant  the number must be maximum , equal, 10, if syst neoadiuvant no check
-data_rule53 <- data.frame()
-
-var_tmp <- colnames(redcap_data)[grepl("f35_[[:digit:]]_numcycle", colnames(redcap_data)) & !grepl("warn", colnames(redcap_data))]
-metadata_tmp <- subset(metadata, field_name %in% var_tmp)
-
-for (i in 1:nrow(metadata_tmp)) {
-  data_tmp <- ddply(subset(redcap_data, f107_complete == 1 & get(metadata_tmp$field_name[i]) != 999 & get(paste0("f30_", i, "_combofsystrt")) %in% c(1,2) & get(paste0("f32_", i, "_systsetting")) != 1), c("a01_id"), summarize,
-                    category = "ERROR",
-                    description = "Number of cycles/administrations is greater than 10",
-                    form1 = "Cancer Under Study Treatment",
-                    event1 = "NON REPEATABLE",
-                    instance1 = redcap_repeat_instance,
-                    var1 = metadata_tmp$field_label[i],
-                    value1 = get(metadata_tmp$field_name[i]),
-                    status = ifelse(value1 <= 10 | value1 == 999, 'PASS','FAIL'))
-  
-  if(nrow(data_tmp) != 0)
-    data_rule53 <- rbind.fill(data_rule53, data_tmp)
 }
 
 ### Rule #54 --------------------------------------------------------------------
@@ -2565,415 +2583,119 @@ data_rules <- data_rules[order(nchar(data_rules), data_rules)] # sort in sequent
 data_rules <- mget(data_rules) # create a list
 data_rules <- Filter(function(x) dim(x)[1] > 0, data_rules) # remove empty dataframes
 
-check_failed <- do.call(rbind.fill, data_rules) %>% select(- status, everything()) %>% 
-  subset(status == 'FAIL') %>% select(-c(grep("value", colnames(.)), status))
+check_failed <- do.call(rbind.fill, data_rules) %>% 
+  select(- status, everything()) %>% 
+  subset(status == 'FAIL') %>% 
+  select(-c(grep("value", colnames(.)), status))
 
 # write and save individual report ---------------------------------------------
 # create workbook
 wb <- createWorkbook()
 
-# add worksheet
-addWorksheet(wb, "Checks")
-addWorksheet(wb, "Legend")
-
-if(!(empty(check_failed))){
-  # if not empty build new dataframe
-  err_regole <- summary.rules(check_failed, method = "patients")
+# create the individual report
+if(properties$id_centro == id_aiocc){
+  dags <- unique(pt_dag$redcap_data_access_group)
   
-  # set new columns names
-  data.table::setnames(err_regole, old = c("category","description", "freq"), new = c("Rule category", "Rule description", "Total"))
+  check_dag <- check_failed %>%
+    left_join(., pt_dag, by = "a01_id")
   
-  # get checks legend
-  legend <- getLegend(check_failed)
-  columnNames <- colnames(legend) %>% 
-    gsub("([[:alpha:]]+)([[:digit:]])", "\\1 \\2", .) %>% 
-    gsub("var", "Variable", .) %>%
-    gsub("event", "Event", .) %>% 
-    gsub("form", "Form", .) %>% 
-    gsub("category", "Rule category", .) %>%
-    gsub("description", "Rule description", .)
-  colnames(legend) <- columnNames
+  for (i in dags) {
+    # add worksheet
+    addWorksheet(wb, paste0(toupper(i),"-Checks"))
+    addWorksheet(wb, paste0(toupper(i),"-Legend"))
+    
+    check_dag_i <- check_dag %>%
+      filter(redcap_data_access_group == i)
+    
+    if(!(empty(check_dag_i))){
+      # if not empty build new dataframe
+      err_regole <- summary.rules(check_dag_i, method = "patients")
+      
+      # set new columns names
+      data.table::setnames(err_regole, old = c("category","description", "freq"), new = c("Rule category", "Rule description", "Total"))
+      
+      # get checks legend
+      legend <- getLegend(select(check_dag_i, -redcap_data_access_group))
+      columnNames <- colnames(legend) %>% 
+        gsub("([[:alpha:]]+)([[:digit:]])", "\\1 \\2", .) %>% 
+        gsub("var", "Variable", .) %>%
+        gsub("event", "Event", .) %>% 
+        gsub("form", "Form", .) %>% 
+        gsub("category", "Rule category", .) %>%
+        gsub("description", "Rule description", .)
+      colnames(legend) <- columnNames
+      
+      # write data on worksheet
+      writeData(wb,sheet = paste0(toupper(i),"-Checks"), err_regole, borders = "all", borderColour = "#999999",
+                headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
+      setColWidths(wb,sheet = paste0(toupper(i),"-Checks"),cols = 1:ncol(err_regole),widths = "auto")
+      
+      writeData(wb,sheet = paste0(toupper(i),"-Legend"), legend, borders = "all", borderColour = "#999999",
+                headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
+      setColWidths(wb,sheet = paste0(toupper(i),"-Legend"),cols = 1:ncol(legend),widths = "auto")
+    } else {
+      # if empty write "No errors found" on the excel file
+      writeData(wb,sheet = paste0(toupper(i),"-Checks"), "No errors found") 
+    }
+    
+  }
   
-  # write data on worksheet
-  writeData(wb,sheet = "Checks", err_regole, borders = "all", borderColour = "#999999",
-            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
-  setColWidths(wb,sheet = "Checks",cols = 1:ncol(err_regole),widths = "auto")
-  
-  writeData(wb,sheet = "Legend", legend, borders = "all", borderColour = "#999999",
-            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
-  setColWidths(wb,sheet = "Legend",cols = 1:ncol(legend),widths = "auto")
 } else {
-  # if empty write "No errors found" on the excel file
-  writeData(wb,sheet = "Checks", "No errors found") 
+  # add worksheet
+  addWorksheet(wb, "Checks")
+  addWorksheet(wb, "Legend")
+  
+  if(!(empty(check_failed))){
+    # if not empty build new dataframe
+    err_regole <- summary.rules(check_failed, method = "patients")
+    
+    # set new columns names
+    data.table::setnames(err_regole, old = c("category","description", "freq"), new = c("Rule category", "Rule description", "Total"))
+    
+    # get checks legend
+    legend <- getLegend(check_failed)
+    columnNames <- colnames(legend) %>% 
+      gsub("([[:alpha:]]+)([[:digit:]])", "\\1 \\2", .) %>% 
+      gsub("var", "Variable", .) %>%
+      gsub("event", "Event", .) %>% 
+      gsub("form", "Form", .) %>% 
+      gsub("category", "Rule category", .) %>%
+      gsub("description", "Rule description", .)
+    colnames(legend) <- columnNames
+    
+    # write data on worksheet
+    writeData(wb,sheet = "Checks", err_regole, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
+    setColWidths(wb,sheet = "Checks",cols = 1:ncol(err_regole),widths = "auto")
+    
+    writeData(wb,sheet = "Legend", legend, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))                             
+    setColWidths(wb,sheet = "Legend",cols = 1:ncol(legend),widths = "auto")
+  } else {
+    # if empty write "No errors found" on the excel file
+    writeData(wb,sheet = "Checks", "No errors found") 
+  }
 }
 
 # write individual report
-file_name <- paste0(properties$id_centro,'-',id_analysis,'-QC-individual-', format(Sys.Date(), "%y%m%d"), '.xlsx')
+file_name <- paste0(properties$id_centro,'-',run_id,'-QC-individual-', format(Sys.Date(), "%y%m%d"), '.xlsx')
 
 # save to xlsx
 saveWorkbook(wb, file_name, overwrite = TRUE)
 
-# Copy in /opt/redcap_dq/environment/data
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
+# Copy in /opt/redcap_dq/environment/data/
+file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data", overwrite = TRUE)
 
-# file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
-# file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
-#             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-individual.xlsx"))
-# Copy in /vantage6-starter_head_and_neck-user-vol/_data
-system(paste0("datafile=\"/opt/redcap_dq/environment/data/", file_name,"\"
+# Copy in /vantage6-starter_head_and_neck-user-vol/_data and in /data
+system(paste0("echo \'datafile=\"/opt/redcap_dq/environment/data/", file_name,"\";
 if [[ \"$( docker ps -q -f name=vantage6-starter_head_and_neck-user)\" && \"$( docker container inspect -f '{{.State.Status}}' vantage6-starter_head_and_neck-user )\" == \"running\" ]]; then
-      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", ID_alg, "-QC-individual.xlsx
-fi"))
+      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", run_id, "-QC-individual.xlsx
+fi;
+cp $datafile /data' | bash"))
 
 ############################################## QC REPORT SUMMARY ##############################################
 # Missing and unknown ---------
-# create a new dataframe to count % of missing and % of missing+unknown
-check_summary <- data.frame("var" = character(0), "var_lab" = character(0), "form" = character(0), "den" = integer(0), "perc_miss" = double(0), "perc_miss_unk" = double(0))
-
-## Select variables with field type != descriptive, calculated or checkbox
-metadata_tmp <- subset(metadata,!(field_type %in% c("descriptive","calc", "checkbox"))) %>%
-  # tolgo anche a01_id e tutte quelle del tipo *_dayunk
-  filter(!(field_name %in% c("a01_id", grep("(date)([[:graph:]]*)(_unk)", metadata$field_name, value = TRUE)))) %>%
-  # tolgo altre variabili per cui non devo controllare missing -------- INSERIRE QUI VARIABILI PER CUI NON SI VUOLE CHECK SU MISSING E UNKNOWN
-  filter(!(field_name %in% c("e03_ct", "e04_mri", "e05_us", "e06_fdgpet", "e07_pet", "e08_opticdig", "e09_ctpet", "e10_unkim", "e11_otherim",
-                             "e13_ct_neck", "e14_mri_neck", "e15_us_neck", "e16_fdgpet_neck", "e17_pet_neck", "e18_ctpet_neck", "e19_unkim_neck", "e20_otherim_neck",
-                             "e22_ct_m", "e23_mri_m", "e24_us_m", "e25_fdgpet_m", "e26_pet_m", "e27_ctpet_m", "e28_unkim_m", "e29_otherim_m")))
-
-for (i in 1:nrow(metadata_tmp)){
-  var_tmp = metadata_tmp$field_name[i]
-  form_complete = ifelse(substring(var_tmp,1,1) == "g",
-                         grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
-                         grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
-  expr_str = renderLogic(metadata_tmp$branching_logic[i])
-  if(!is.na(form_complete)){
-    if(is.na(expr_str))
-      ps_tmp <- subset(redcap_data, get(form_complete) == 1)
-    else
-      ps_tmp <- subset(redcap_data, get(form_complete) == 1 & eval(parse(text = expr_str)))
-  } else {
-    event <- case_when(substring(var_tmp,1,1) == "j" ~ "imaging_available",
-                       substring(var_tmp,1,1) == "k" ~ "tumor_specimen_available",
-                       substring(var_tmp,1,1) == "l" ~ "gene_test_expression_analysis")
-
-    if(is.na(expr_str))
-      ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event)
-    else
-      ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
-  }
-
-  if(nrow(ps_tmp) != 0){
-    check_summary <- getMissUnk(ps_tmp, var_tmp, check_summary)
-  }
-  
-  gc()
-}
-
-## Checkbox
-metadata_tmp <- subset(metadata, field_type %in% c("checkbox"))
-
-for (i in 1:nrow(metadata_tmp)){
-  var_patt = metadata_tmp$field_name[i]
-  form_complete = ifelse(substring(var_tmp,1,1) == "g",
-                         grep(paste0(substring(var_patt,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
-                         grep(paste0(substring(var_patt,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
-  expr_str = renderLogic(metadata_tmp$branching_logic[i])
-  if(!is.na(form_complete)){
-    if(is.na(expr_str))
-      ps_tmp <- subset(redcap_data, get(form_complete) == 1)
-    else
-      ps_tmp <- subset(redcap_data, get(form_complete) == 1 & eval(parse(text = expr_str)))
-  } else {
-    event <- case_when(substring(var_patt,1,1) == "j" ~ "imaging_available",
-                       substring(var_patt,1,1) == "k" ~ "tumor_specimen_available",
-                       substring(var_patt,1,1) == "l" ~ "gene_test_expression_analysis")
-
-    if(is.na(expr_str))
-      ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event)
-    else
-      ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
-  }
-
-  if(nrow(ps_tmp) != 0){
-    check_summary <- getMissUnkCheckbox(ps_tmp, var_patt, check_summary)
-
-  }
-  
-  gc()
-}
-
-check_summary <- check_summary[gtools::mixedorder(check_summary$var),] %>%
-  mutate(perc_miss = formattable::percent(perc_miss)) %>%
-  mutate(perc_miss_unk = formattable::percent(perc_miss_unk)) %>%
-  mutate(form = case_when(form == "preliminary" ~ "Preliminary",
-                          form == "demographic_life_style" ~ "Demographic & life style",
-                          form == "previous_cancer_gensyndrome" ~ "Previous cancer gen.syndrome",
-                          form == "cancer_under_study" ~ "Cancer under study",
-                          form == "staging_procedures_and_stage" ~ "Staging procedures and stage",
-                          form == "cancer_under_study_treatment" ~ "Cancer Under Study Treatment",
-                          form %in% grep("progressionrecurrencepersistent_disease", unique(metadata$form_name), value = TRUE) ~ "Progression/Recurrence/Persistent disease",
-                          form == "status_of_patient_at_fup" ~ "Status of patient at fup",
-                          form == "adverse_events" ~ "Adverse events",
-                          form == "imaging_available" ~ "Imaging available",
-                          form == "tumor_specimen_available" ~ "Tumor specimen available",
-                          form == "gene_test_expression_analysis" ~ "Gene test expression analysis")) %>%
-  select(-c("var")) %>%
-  mutate(var_lab = gsub("<.*?>", "", var_lab)) %>%
-  filter(var_lab != "Instrument status:")
-
-colnames(check_summary) <- c("Variable", "Form", "Denominator","% missing", "% missing + unknown")
-
-# COMPLETED PATIENTS ------
-data_non_rep <- filter(redcap_data, redcap_event_name == "non_repeatable_arm_1")
-# Instrument 1-6, 8 completed, all the 7s missing ----
-pts_complete_1 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
-                                            if_all(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- data.frame("status" = "Complete",
-                            "description" = "Instrument 1-6, 8 completed, all the 7s missing",
-                            "n_patients" = nrow(pts_complete_1),
-                            "n_error" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id)),
-                            "perc" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id))/nrow(pts_complete_1))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first one completed and the others missing
-pts_complete_2 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete"), ~ . == 1) &
-                                            if_all(c("g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first one completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_2),
-                                                      "n_error" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id))/nrow(pts_complete_2)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first two completed and the others missing
-pts_complete_3 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete"), ~ . == 1) &
-                                            if_all(c("g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first two completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_3),
-                                                      "n_error" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id))/nrow(pts_complete_3)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first three completed and the others missing
-pts_complete_4 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete"), ~ . == 1) &
-                                            if_all(c("g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first three completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_4),
-                                                      "n_error" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id))/nrow(pts_complete_4)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first four completed and the others missing
-pts_complete_5 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete"), ~ . == 1) &
-                                            if_all(c("g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first four completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_5),
-                                                      "n_error" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id))/nrow(pts_complete_5)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first five completed and the others missing
-pts_complete_6 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete"), ~ . == 1) &
-                                            if_all(c("g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first five completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_6),
-                                                      "n_error" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id))/nrow(pts_complete_6)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first six completed and the others missing
-pts_complete_7 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete"), ~ . == 1) &
-                                            if_all(c("g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first six completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_7),
-                                                      "n_error" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id))/nrow(pts_complete_7)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first seven completed and the others missing
-pts_complete_8 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete"), ~ . == 1) &
-                                            if_all(c("g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first seven completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_8),
-                                                      "n_error" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id))/nrow(pts_complete_8)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first eight completed and the others missing
-pts_complete_9 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete"), ~ . == 1) &
-                                            if_all(c("g9_119_complete", "g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first eight completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_9),
-                                                      "n_error" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id))/nrow(pts_complete_9)))
-
-# Instrument 1-6, 8 completed and for all the Instruments 7  the first nine completed and the others missing
-pts_complete_10 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete"), ~ . == 1) &
-                                             if_all(c("g10_119_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first nine completed and the others missing",
-                                                      "n_patients" = nrow(pts_complete_10),
-                                                      "n_error" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id))/nrow(pts_complete_10)))
-
-# Instrument 1-6, 8 completed and all the Instruments 7  are completed
-pts_complete_11 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 1))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
-                                                      "description" = "Instrument 1-6, 8 completed and all the Instruments 7  are completed",
-                                                      "n_patients" = nrow(pts_complete_11),
-                                                      "n_error" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id))/nrow(pts_complete_11)))
-
-# Instrument 1-6, 8 completed and at least one instrument 7 incompleted
-pts_complete_12 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
-                                             if_any(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 2))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
-                                                      "description" = "Instrument 1-6, 8 completed and at least one instrument 7 incompleted",
-                                                      "n_patients" = nrow(pts_complete_12),
-                                                      "n_error" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id))/nrow(pts_complete_12)))
-
-# At least one Instrument 1-6 incompleted and the others completed, 8 completed
-pts_complete_13 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ !is.na(.)) &
-                                             if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 2))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
-                                                      "description" = "At least one Instrument 1-6 or 8 incompleted (without missing)",
-                                                      "n_patients" = nrow(pts_complete_13),
-                                                      "n_error" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id))/nrow(pts_complete_13)))
-
-pts_complete_14 <- data_non_rep %>% filter(if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ is.na(.)))
-
-case_complete <- rbind.fill(case_complete, data.frame("status" = "Missing",
-                                                      "description" = "At least one Instrument 1-6 or 8 missing",
-                                                      "n_patients" = nrow(pts_complete_14),
-                                                      "n_error" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id)),
-                                                      "perc" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id))/nrow(pts_complete_14)))
-
-
-case_complete <- case_complete %>% mutate(n_error = ifelse(n_patients == 0, 0, n_error)) %>%
-  mutate(perc = ifelse(n_patients == 0, 0, perc)) %>%
-  mutate(perc = formattable::percent(perc))
-
-colnames(case_complete) <- c("Status", "Description","N pts", "N pts with at least one error", "% pts with at least one error over total n pts")
-
-# Staging & Treatments ---------
-###### N.B. per trattamento considerare sempre e solo clinical stage
-data_trt <- redcap_data %>% subset(redcap_event_name == "non_repeatable_arm_1") %>%
-  mutate(treatment = case_when(
-    # SOLO UN TRATTAMENTO
-    f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) ~ "Only surgery",
-    f53_radio %in% c(1,2) & !(f01_surgery %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) ~ "Only radiotherapy",
-    f30_1_combofsystrt == 1 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only chemo",
-    f30_1_combofsystrt == 2 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only immuno",
-    f30_1_combofsystrt == 3 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only target",
-    # SOLO CONCOMITANTI
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
-      max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Concomitant chemo/radio",
-    # CHIRURGIA + altro
-    f01_surgery %in% c(1,2) & f55_radiosett == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f80_radiostartdate <= (f02_datesurg + 75) ~ "Surgery + postoperative radiotherapy",
-    f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f02_datesurg + 60) ~ "Surgery + adjuvant chemo",
-    f01_surgery %in% c(1,2) & f55_radiosett == 4 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) &
-      min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (f02_datesurg + 75) & max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Surgery + Postoperative radio concomitant to chemotherapy",
-    # RADIO + altro
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f81_radioendate + 45) ~ "Radio + adjuvant chemo",
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & f30_2_combofsystrt == 1 & f32_2_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
-      max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 &
-      f33_2_startdate_syst <= max(c(f33_1_startdate_syst, f80_radiostartdate)) + 45 ~ "Concomitant chemo/radio + adjuvant chemo",
-    # CHEMO + altro
-    !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f30_2_combofsystrt == 2 & !(f29_3_systrt %in% c(1,2)) &
-      all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Chemo + immuno",
-    !(f01_surgery %in% c(1,2)) & f53_radio %in% c(1,2) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
-      !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
-      f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + radio",
-    f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
-      !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
-      f33_1_startdate_syst <= (d01_diagdate + 60) & f02_datesurg <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + surgery",
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & !(f29_3_systrt %in% c(1,2)) &
-      f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
-      max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 ~ "Neo-adjuvant chemo + concomitant radio/chemo",
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & f30_3_combofsystrt == 1 & f32_3_systsetting == 3 &
-      f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
-      max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 &
-      f33_3_startdate_syst <= max(c(f34_2_enddate_syst, f81_radioendate)) + 45 ~ "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant",
-    !(f01_surgery %in% c(1,2)) & f55_radiosett == 5 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_1_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) &
-      f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= f34_1_enddate_syst + 30 &
-      f33_2_startdate_syst <= f81_radioendate + 45 ~ "Neo-adjuvant chemo + radio + chemo adjuvant",
-    # IMMUNO + altro
-    !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 3 & !(f29_3_systrt %in% c(1,2)) &
-      all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + target",
-    !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 1 & !(f29_3_systrt %in% c(1,2)) &
-      all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + chemo",
-    # SOLO CLINICAL TRIAL
-    !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) & f105_clinicltrial == 1 ~ "Clinical trial only",
-    # NON TRATTATO
-    !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) ~ "No treatment",
-    # OTHER
-    TRUE ~ "Other")) %>%
-  select(c("a01_id", "d11_siterare", "d11_sitecomrar","e34_cstage", "treatment")) %>%
-  mutate(e34_cstage = case_when(e34_cstage == 999 ~ "Unknown",
-                                e34_cstage == 1 ~ "0",
-                                e34_cstage == 2 ~ "I",
-                                e34_cstage == 3 ~ "II",
-                                e34_cstage == 4 ~ "III",
-                                e34_cstage == 5 ~ "IV",
-                                e34_cstage == 6 ~ "IVA",
-                                e34_cstage == 7 ~ "IVB",
-                                e34_cstage == 8 ~ "IVC")) %>%
-  mutate(site = case_when(d11_siterare == 1 | d11_sitecomrar == 1 ~ "Nasal cavity and paranasal sinuses",
-                          d11_siterare == 2 | d11_sitecomrar == 2 ~ "Nasopharynx",
-                          d11_siterare %in% c(3,4,5) | d11_sitecomrar %in% c(3,4,5) ~ "Parotid gland; Submandibular gland; Sublingual gland",
-                          d11_siterare == 6 | d11_sitecomrar == 6 ~ "Middle ear",
-                          # !is.na(d11_siterare) | !is.na(d11_sitecomrar) ~ "Other",
-                          TRUE ~ "Other")) %>%
-  plyr::count(c("e34_cstage", "treatment", "site")) %>%
-  mutate(e34_cstage = ifelse(is.na(e34_cstage), "Stage not defined", e34_cstage))
-
-lev_stage <- factor(unique(data_trt$e34_cstage),
-                    levels = c("0", "I", "II", "III", "IV", "IVA", "IVB", "IVC", "Unknown", "Stage not defined"))
-lev_trt <- factor(unique(data_trt$treatment),
-                  levels = c("Only surgery", "Only radiotherapy", "Only chemo", "Only immuno", "Only target", "Concomitant chemo/radio", "Surgery + postoperative radiotherapy", "Surgery + adjuvant chemo", "Surgery + Postoperative radio concomitant to chemotherapy", "Radio + adjuvant chemo", "Concomitant chemo/radio + adjuvant chemo", "Chemo + immuno",
-                             "Neo-adjuvant chemo + radio", "Neo-adjuvant chemo + surgery", "Neo-adjuvant chemo + concomitant radio/chemo", "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant", "Neo-adjuvant chemo + radio + chemo adjuvant", "Immuno + target", "Immuno + chemo", "Clinical trial only", "No treatment", "Other"))
-lev_site <- factor(unique(data_trt$site),
-                   levels = c("Nasal cavity and paranasal sinuses", "Nasopharynx", "Parotid gland; Submandibular gland; Sublingual gland", "Middle ear", "Other"))
-
-stage_per_treat_tot <- setNames(vector("list", length(levels(lev_site))), levels(lev_site))
-
-for (k in names(stage_per_treat_tot)) {
-  data_trt_tmp <- data_trt %>%
-    filter(site == k)
-
-  stage_per_treat <- setNames(data.frame(matrix(ncol = length(levels(lev_trt)), nrow = length(levels(lev_stage))), row.names = levels(lev_stage)), levels(lev_trt))
-
-  for (i in 1:nrow(stage_per_treat)) {
-    stage <- rownames(stage_per_treat)[i]
-    for (j in 1:ncol(stage_per_treat)) {
-      trt <- colnames(stage_per_treat)[j]
-      stage_per_treat[i,j] <- ifelse(length(data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq']),
-                                     data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq'], NA)
-    }
-  }
-
-  stage_per_treat <- stage_per_treat %>%
-    mutate_all(~replace(., is.na(.), 0)) %>%
-    mutate(`No treatment` = `No treatment`  + `Clinical trial only`)
-
-  stage_per_treat_tot[[k]] <- stage_per_treat
-  
-  gc()
-}
-
-# Core variables --------
+## Define core variables
 core_var <- c("a05_date", "a06_phase", "b04_sex", "b06_resid", "b07_smoke", "b11_smokepy_auto", "b13_alc", "b14_carc", "b19_comorb",
               "c01_prevc", "c02_prevcsite", "d01_diagdate", "d03_diagage_au", "d05_histo", "d06_histosubg_sq", "d07_histosubg_ade", "d08_histosubg_net",
               "d09_histosubg_odo", "d11_siterare", "d11_sitecomrar", "d14_subsite_nasal", "d15_subsite_naso", "d16_subsite_hypo", "d17_subsite_oro",
@@ -3000,46 +2722,898 @@ core_var <- c("a05_date", "a06_phase", "b04_sex", "b06_resid", "b07_smoke", "b11
 
 metadata_core <- metadata %>% subset(field_name %in% core_var)
 
-# remove patients with at least one missining or unknown core variable
-core_pts <- redcap_data %>% subset(redcap_event_name == "non_repeatable_arm_1")
+# create workbook
+wb <- createWorkbook()
 
-for (i in 1:nrow(metadata_core)) {
-  var_tmp = metadata_core$field_name[i]
-  form_complete = ifelse(substring(var_tmp,1,1) == "g",
-                         grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
-                         grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
-  expr_str = renderLogic(metadata_core$branching_logic[i])
-  if(metadata_core$field_type[i] != "checkbox"){
-    if(!is.na(expr_str)){
-      pts_tmp <- core_pts %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
-        subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
-    } else {
-      pts_tmp <- core_pts %>% subset(get(form_complete) == 1) %>%
-        subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
-    }
-  } else {
-    cond <- ifelse(length(grep(paste0(var_tmp, "___999"), colnames(core_pts))),
-                   'all(is.na(mget(grep(var_tmp, colnames(core_pts), value = TRUE), inherits = TRUE))) | get(grep(paste0(var_tmp, "___999"), colnames(core_pts), value = TRUE)) == 1',
-                   'all(is.na(mget(grep(var_tmp, colnames(core_pts), value = TRUE), inherits = TRUE)))')
-    if(!is.na(expr_str)){
-      pts_tmp <- core_pts %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
-        subset(eval(parse(text = cond)))
-    } else {
-      pts_tmp <- core_pts %>% subset(get(form_complete) == 1) %>%
-        subset(eval(parse(text = cond)))
-    }
-  }
-
-  core_pts <- subset(core_pts, !(a01_id %in% pts_tmp$a01_id))
+if(properties$id_centro == id_aiocc) {
   
-  gc()
+  core_pts <- NULL
+  
+  for (m in dags) {
+    redcap_data_m <- redcap_data %>%
+      filter(redcap_data_access_group == m)
+    
+    # create a new dataframe to count % of missing and % of missing+unknown
+    check_summary <- data.frame("var" = character(0), "var_lab" = character(0), "form" = character(0), "den" = integer(0), "perc_miss" = double(0), "perc_miss_unk" = double(0))
+    
+    ## Select variables with field type != descriptive, calculated or checkbox
+    metadata_tmp <- subset(metadata,!(field_type %in% c("descriptive","calc", "checkbox"))) %>%
+      # tolgo anche a01_id e tutte quelle del tipo *_dayunk
+      filter(!(field_name %in% c("a01_id", grep("(date)([[:graph:]]*)(_unk)", metadata$field_name, value = TRUE)))) %>%
+      # tolgo altre variabili per cui non devo controllare missing -------- INSERIRE QUI VARIABILI PER CUI NON SI VUOLE CHECK SU MISSING E UNKNOWN
+      filter(!(field_name %in% c("e03_ct", "e04_mri", "e05_us", "e06_fdgpet", "e07_pet", "e08_opticdig", "e09_ctpet", "e10_unkim", "e11_otherim",
+                                 "e13_ct_neck", "e14_mri_neck", "e15_us_neck", "e16_fdgpet_neck", "e17_pet_neck", "e18_ctpet_neck", "e19_unkim_neck", "e20_otherim_neck",
+                                 "e22_ct_m", "e23_mri_m", "e24_us_m", "e25_fdgpet_m", "e26_pet_m", "e27_ctpet_m", "e28_unkim_m", "e29_otherim_m")))
+    
+    
+    for (i in 1:nrow(metadata_tmp)){
+      var_tmp = metadata_tmp$field_name[i]
+      form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                             grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                             grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+      expr_str = renderLogic(metadata_tmp$branching_logic[i])
+      if(!is.na(form_complete)){
+        if(is.na(expr_str))
+          ps_tmp <- subset(redcap_data_m, get(form_complete) == 1)
+        else
+          ps_tmp <- subset(redcap_data_m, get(form_complete) == 1 & eval(parse(text = expr_str)))
+      } else {
+        event <- case_when(substring(var_tmp,1,1) == "j" ~ "imaging_available",
+                           substring(var_tmp,1,1) == "k" ~ "tumor_specimen_available",
+                           substring(var_tmp,1,1) == "l" ~ "gene_test_expression_analysis")
+        
+        if(is.na(expr_str))
+          ps_tmp <- subset(redcap_data_m, redcap_repeat_instrument == event)
+        else
+          ps_tmp <- subset(redcap_data_m, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
+      }
+      
+      if(nrow(ps_tmp) != 0){
+        check_summary <- getMissUnk(ps_tmp, var_tmp, check_summary)
+      }
+      
+      gc()
+    }
+    
+    ## Checkbox
+    metadata_tmp <- subset(metadata, field_type %in% c("checkbox"))
+    
+    for (i in 1:nrow(metadata_tmp)){
+      var_patt = metadata_tmp$field_name[i]
+      form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                             grep(paste0(substring(var_patt,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                             grep(paste0(substring(var_patt,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+      expr_str = renderLogic(metadata_tmp$branching_logic[i])
+      if(!is.na(form_complete)){
+        if(is.na(expr_str))
+          ps_tmp <- subset(redcap_data_m, get(form_complete) == 1)
+        else
+          ps_tmp <- subset(redcap_data_m, get(form_complete) == 1 & eval(parse(text = expr_str)))
+      } else {
+        event <- case_when(substring(var_patt,1,1) == "j" ~ "imaging_available",
+                           substring(var_patt,1,1) == "k" ~ "tumor_specimen_available",
+                           substring(var_patt,1,1) == "l" ~ "gene_test_expression_analysis")
+        
+        if(is.na(expr_str))
+          ps_tmp <- subset(redcap_data_m, redcap_repeat_instrument == event)
+        else
+          ps_tmp <- subset(redcap_data_m, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
+      }
+      
+      if(nrow(ps_tmp) != 0){
+        check_summary <- getMissUnkCheckbox(ps_tmp, var_patt, check_summary)
+      }
+      
+      gc()
+    }
+    
+    # Sort in alphabetic order and change columns names ----
+    check_summary <- check_summary[gtools::mixedorder(check_summary$var),] %>%
+      mutate(perc_miss = formattable::percent(perc_miss)) %>%
+      mutate(perc_miss_unk = formattable::percent(perc_miss_unk)) %>%
+      mutate(form = case_when(form == "preliminary" ~ "Preliminary",
+                              form == "demographic_life_style" ~ "Demographic & life style",
+                              form == "previous_cancer_gensyndrome" ~ "Previous cancer gen.syndrome",
+                              form == "cancer_under_study" ~ "Cancer under study",
+                              form == "staging_procedures_and_stage" ~ "Staging procedures and stage",
+                              form == "cancer_under_study_treatment" ~ "Cancer Under Study Treatment",
+                              form %in% grep("progressionrecurrencepersistent_disease", unique(metadata$form_name), value = TRUE) ~ "Progression/Recurrence/Persistent disease",
+                              form == "status_of_patient_at_fup" ~ "Status of patient at fup",
+                              form == "adverse_events" ~ "Adverse events",
+                              form == "imaging_available" ~ "Imaging available",
+                              form == "tumor_specimen_available" ~ "Tumor specimen available",
+                              form == "gene_test_expression_analysis" ~ "Gene test expression analysis")) %>%
+      select(-c("var")) %>%
+      mutate(var_lab = gsub("<.*?>", "", var_lab)) %>%
+      filter(var_lab != "Instrument status:")
+    
+    colnames(check_summary) <- c("Variable", "Form", "Denominator","% missing", "% missing + unknown")
+    
+    # COMPLETED PATIENTS ------
+    data_non_rep <- filter(redcap_data_m, redcap_event_name == "non_repeatable_arm_1")
+    # Instrument 1-6, 8 completed, all the 7s missing ----
+    pts_complete_1 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
+                                                if_all(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- data.frame("status" = "Complete",
+                                "description" = "Instrument 1-6, 8 completed, all the 7s missing",
+                                "n_patients" = nrow(pts_complete_1),
+                                "n_error" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id)),
+                                "perc" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id))/nrow(pts_complete_1))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first one completed and the others missing
+    pts_complete_2 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete"), ~ . == 1) &
+                                                if_all(c("g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first one completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_2),
+                                                          "n_error" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id))/nrow(pts_complete_2)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first two completed and the others missing
+    pts_complete_3 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete"), ~ . == 1) &
+                                                if_all(c("g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first two completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_3),
+                                                          "n_error" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id))/nrow(pts_complete_3)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first three completed and the others missing
+    pts_complete_4 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete"), ~ . == 1) &
+                                                if_all(c("g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first three completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_4),
+                                                          "n_error" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id))/nrow(pts_complete_4)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first four completed and the others missing
+    pts_complete_5 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete"), ~ . == 1) &
+                                                if_all(c("g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first four completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_5),
+                                                          "n_error" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id))/nrow(pts_complete_5)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first five completed and the others missing
+    pts_complete_6 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete"), ~ . == 1) &
+                                                if_all(c("g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first five completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_6),
+                                                          "n_error" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id))/nrow(pts_complete_6)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first six completed and the others missing
+    pts_complete_7 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete"), ~ . == 1) &
+                                                if_all(c("g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first six completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_7),
+                                                          "n_error" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id))/nrow(pts_complete_7)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first seven completed and the others missing
+    pts_complete_8 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete"), ~ . == 1) &
+                                                if_all(c("g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first seven completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_8),
+                                                          "n_error" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id))/nrow(pts_complete_8)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first eight completed and the others missing
+    pts_complete_9 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete"), ~ . == 1) &
+                                                if_all(c("g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first eight completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_9),
+                                                          "n_error" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id))/nrow(pts_complete_9)))
+    
+    # Instrument 1-6, 8 completed and for all the Instruments 7  the first nine completed and the others missing
+    pts_complete_10 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete"), ~ . == 1) &
+                                                 if_all(c("g10_119_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first nine completed and the others missing",
+                                                          "n_patients" = nrow(pts_complete_10),
+                                                          "n_error" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id))/nrow(pts_complete_10)))
+    
+    # Instrument 1-6, 8 completed and all the Instruments 7  are completed
+    pts_complete_11 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 1))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                          "description" = "Instrument 1-6, 8 completed and all the Instruments 7  are completed",
+                                                          "n_patients" = nrow(pts_complete_11),
+                                                          "n_error" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id))/nrow(pts_complete_11)))
+    
+    # Instrument 1-6, 8 completed and at least one instrument 7 incompleted
+    pts_complete_12 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
+                                                 if_any(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 2))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
+                                                          "description" = "Instrument 1-6, 8 completed and at least one instrument 7 incompleted",
+                                                          "n_patients" = nrow(pts_complete_12),
+                                                          "n_error" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id))/nrow(pts_complete_12)))
+    
+    # At least one Instrument 1-6 incompleted and the others completed, 8 completed
+    pts_complete_13 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ !is.na(.)) &
+                                                 if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 2))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
+                                                          "description" = "At least one Instrument 1-6 or 8 incompleted (without missing)",
+                                                          "n_patients" = nrow(pts_complete_13),
+                                                          "n_error" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id))/nrow(pts_complete_13)))
+    
+    pts_complete_14 <- data_non_rep %>% filter(if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ is.na(.)))
+    
+    case_complete <- rbind.fill(case_complete, data.frame("status" = "Missing",
+                                                          "description" = "At least one Instrument 1-6 or 8 missing",
+                                                          "n_patients" = nrow(pts_complete_14),
+                                                          "n_error" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id)),
+                                                          "perc" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id))/nrow(pts_complete_14)))
+    
+    
+    case_complete <- case_complete %>% mutate(n_error = ifelse(n_patients == 0, 0, n_error)) %>%
+      mutate(perc = ifelse(n_patients == 0, 0, perc)) %>%
+      mutate(perc = formattable::percent(perc))
+    
+    colnames(case_complete) <- c("Status", "Description","N pts", "N pts with at least one error", "% pts with at least one error over total n pts")
+    
+    # Staging & Treatments ---------
+    ###### N.B. per trattamento considerare sempre e solo clinical stage
+    data_trt <- redcap_data_m %>% subset(redcap_event_name == "non_repeatable_arm_1") %>%
+      mutate(treatment = case_when(
+        # SOLO UN TRATTAMENTO
+        f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) ~ "Only surgery",
+        f53_radio %in% c(1,2) & !(f01_surgery %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE), inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) ~ "Only radiotherapy",
+        f30_1_combofsystrt == 1 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only chemo",
+        f30_1_combofsystrt == 2 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only immuno",
+        f30_1_combofsystrt == 3 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only target",
+        # SOLO CONCOMITANTI
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
+          max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Concomitant chemo/radio",
+        # CHIRURGIA + altro
+        f01_surgery %in% c(1,2) & f55_radiosett == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f80_radiostartdate <= (f02_datesurg + 75) ~ "Surgery + postoperative radiotherapy",
+        f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f02_datesurg + 60) ~ "Surgery + adjuvant chemo",
+        f01_surgery %in% c(1,2) & f55_radiosett == 4 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) &
+          min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (f02_datesurg + 75) & max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Surgery + Postoperative radio concomitant to chemotherapy",
+        # RADIO + altro
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f81_radioendate + 45) ~ "Radio + adjuvant chemo",
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & f30_2_combofsystrt == 1 & f32_2_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
+          max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 &
+          f33_2_startdate_syst <= max(c(f33_1_startdate_syst, f80_radiostartdate)) + 45 ~ "Concomitant chemo/radio + adjuvant chemo",
+        # CHEMO + altro
+        !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f30_2_combofsystrt == 2 & !(f29_3_systrt %in% c(1,2)) &
+          all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Chemo + immuno",
+        !(f01_surgery %in% c(1,2)) & f53_radio %in% c(1,2) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
+          !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
+          f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + radio",
+        f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
+          !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
+          f33_1_startdate_syst <= (d01_diagdate + 60) & f02_datesurg <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + surgery",
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & !(f29_3_systrt %in% c(1,2)) &
+          f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
+          max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 ~ "Neo-adjuvant chemo + concomitant radio/chemo",
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & f30_3_combofsystrt == 1 & f32_3_systsetting == 3 &
+          f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
+          max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 &
+          f33_3_startdate_syst <= max(c(f34_2_enddate_syst, f81_radioendate)) + 45 ~ "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant",
+        !(f01_surgery %in% c(1,2)) & f55_radiosett == 5 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_1_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) &
+          f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= f34_1_enddate_syst + 30 &
+          f33_2_startdate_syst <= f81_radioendate + 45 ~ "Neo-adjuvant chemo + radio + chemo adjuvant",
+        # IMMUNO + altro
+        !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 3 & !(f29_3_systrt %in% c(1,2)) &
+          all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + target",
+        !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 1 & !(f29_3_systrt %in% c(1,2)) &
+          all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + chemo",
+        # SOLO CLINICAL TRIAL
+        !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) & f105_clinicltrial == 1 ~ "Clinical trial only",
+        # NON TRATTATO
+        !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data_m), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) ~ "No treatment",
+        # OTHER
+        TRUE ~ "Other")) %>%
+      select(c("a01_id", "d11_siterare", "d11_sitecomrar","e34_cstage", "treatment")) %>%
+      mutate(e34_cstage = case_when(e34_cstage == 999 ~ "Unknown",
+                                    e34_cstage == 1 ~ "0",
+                                    e34_cstage == 2 ~ "I",
+                                    e34_cstage == 3 ~ "II",
+                                    e34_cstage == 4 ~ "III",
+                                    e34_cstage == 5 ~ "IV",
+                                    e34_cstage == 6 ~ "IVA",
+                                    e34_cstage == 7 ~ "IVB",
+                                    e34_cstage == 8 ~ "IVC")) %>%
+      mutate(site = case_when(d11_siterare == 1 | d11_sitecomrar == 1 ~ "Nasal cavity and paranasal sinuses",
+                              d11_siterare == 2 | d11_sitecomrar == 2 ~ "Nasopharynx",
+                              d11_siterare %in% c(3,4,5) | d11_sitecomrar %in% c(3,4,5) ~ "Parotid gland; Submandibular gland; Sublingual gland",
+                              d11_siterare == 6 | d11_sitecomrar == 6 ~ "Middle ear",
+                              # !is.na(d11_siterare) | !is.na(d11_sitecomrar) ~ "Other",
+                              TRUE ~ "Other")) %>%
+      plyr::count(c("e34_cstage", "treatment", "site")) %>%
+      mutate(e34_cstage = ifelse(is.na(e34_cstage), "Stage not defined", e34_cstage))
+    
+    lev_stage <- factor(unique(data_trt$e34_cstage),
+                        levels = c("0", "I", "II", "III", "IV", "IVA", "IVB", "IVC", "Unknown", "Stage not defined"))
+    lev_trt <- factor(unique(data_trt$treatment),
+                      levels = c("Only surgery", "Only radiotherapy", "Only chemo", "Only immuno", "Only target", "Concomitant chemo/radio", "Surgery + postoperative radiotherapy", "Surgery + adjuvant chemo", "Surgery + Postoperative radio concomitant to chemotherapy", "Radio + adjuvant chemo", "Concomitant chemo/radio + adjuvant chemo", "Chemo + immuno",
+                                 "Neo-adjuvant chemo + radio", "Neo-adjuvant chemo + surgery", "Neo-adjuvant chemo + concomitant radio/chemo", "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant", "Neo-adjuvant chemo + radio + chemo adjuvant", "Immuno + target", "Immuno + chemo", "Clinical trial only", "No treatment", "Other"))
+    lev_site <- factor(unique(data_trt$site),
+                       levels = c("Nasal cavity and paranasal sinuses", "Nasopharynx", "Parotid gland; Submandibular gland; Sublingual gland", "Middle ear", "Other"))
+    
+    stage_per_treat_tot <- setNames(vector("list", length(levels(lev_site))), levels(lev_site))
+    
+    for (k in names(stage_per_treat_tot)) {
+      data_trt_tmp <- data_trt %>%
+        filter(site == k)
+      
+      stage_per_treat <- setNames(data.frame(matrix(ncol = length(levels(lev_trt)), nrow = length(levels(lev_stage))), row.names = levels(lev_stage)), levels(lev_trt))
+      
+      for (i in 1:nrow(stage_per_treat)) {
+        stage <- rownames(stage_per_treat)[i]
+        for (j in 1:ncol(stage_per_treat)) {
+          trt <- colnames(stage_per_treat)[j]
+          stage_per_treat[i,j] <- ifelse(length(data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq']),
+                                         data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq'], NA)
+        }
+      }
+      
+      stage_per_treat <- stage_per_treat %>%
+        mutate_all(~replace(., is.na(.), 0)) %>%
+        mutate(`No treatment` = `No treatment`  + `Clinical trial only`)
+      
+      stage_per_treat_tot[[k]] <- stage_per_treat
+      
+      gc()
+    }
+    
+    # Year of diagnosis & Sites
+    data_year_diag <- redcap_data_m %>% subset(redcap_event_name == "non_repeatable_arm_1") %>%
+      select(c("a01_id", "d01_diagdate", "d05_histo", "d11_siterare", "d11_sitecomrar")) %>%
+      mutate(site = ifelse(!is.na(d11_siterare), d11_siterare, d11_sitecomrar)) %>%
+      mutate(year_diag = format(d01_diagdate, format = '%Y')) %>%
+      plyr::count(c("year_diag", "site", "d05_histo")) 
+    
+    colnames(data_year_diag) <- c("Year of diagnosis", "Site", "Histology group", "Total")
+    
+    # Core variables --------
+    # remove patients with at least one missining or unknown core variable
+    core_pts_m <- redcap_data_m %>% subset(redcap_event_name == "non_repeatable_arm_1")
+    
+    for (i in 1:nrow(metadata_core)) {
+      var_tmp = metadata_core$field_name[i]
+      form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                             grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                             grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+      expr_str = renderLogic(metadata_core$branching_logic[i])
+      if(metadata_core$field_type[i] != "checkbox"){
+        if(!is.na(expr_str)){
+          pts_tmp <- core_pts_m %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
+            subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
+        } else {
+          pts_tmp <- core_pts_m %>% subset(get(form_complete) == 1) %>%
+            subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
+        }
+      } else {
+        cond <- ifelse(length(grep(paste0(var_tmp, "___999"), colnames(core_pts_m))),
+                       'all(is.na(mget(grep(var_tmp, colnames(core_pts_m), value = TRUE), inherits = TRUE))) | get(grep(paste0(var_tmp, "___999"), colnames(core_pts_m), value = TRUE)) == 1',
+                       'all(is.na(mget(grep(var_tmp, colnames(core_pts_m), value = TRUE), inherits = TRUE)))')
+        if(!is.na(expr_str)){
+          pts_tmp <- core_pts_m %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
+            subset(eval(parse(text = cond)))
+        } else {
+          pts_tmp <- core_pts_m %>% subset(get(form_complete) == 1) %>%
+            subset(eval(parse(text = cond)))
+        }
+      }
+      
+      core_pts_m <- subset(core_pts_m, !(a01_id %in% pts_tmp$a01_id))
+      
+      gc()
+    }
+    
+    # dataframe for summary report
+    core <- data.frame("patients" = length(unique(redcap_data_m$a01_id)), "pts_core" = nrow(core_pts_m),
+                       "perc" = formattable::percent(nrow(core_pts_m)/length(unique(redcap_data_m$a01_id))))
+    
+    colnames(core) <- c("N patients", "N patients with core variables", "% patients with core variables")
+    
+    # add worksheet
+    addWorksheet(wb, paste0(toupper(m),"-Miss&Unk"))
+    addWorksheet(wb, paste0(toupper(m),"-Completed"))
+    addWorksheet(wb, paste0(toupper(m),"-Stage&Treat"))
+    addWorksheet(wb, paste0(toupper(m),"-Diag&Site"))
+    addWorksheet(wb, paste0(toupper(m),"-Core"))
+    
+    # write data on worksheet
+    # Missing & Unknown
+    writeData(wb,sheet = paste0(toupper(m),"-Miss&Unk"), check_summary, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+    setColWidths(wb,sheet = paste0(toupper(m),"-Miss&Unk"),cols = 1:ncol(check_summary), widths = "auto")
+    
+    # Completed patients
+    mergeCells(wb, paste0(toupper(m),"-Completed"), cols = 1, rows = 2:12)
+    mergeCells(wb, paste0(toupper(m),"-Completed"), cols = 1, rows = 13:14)
+    writeData(wb,sheet = paste0(toupper(m),"-Completed"), case_complete, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+    setColWidths(wb,sheet = paste0(toupper(m),"-Completed"),cols = 1:ncol(case_complete), widths = "auto")
+    
+    # Staging & Treatments
+    curr_row <- 1
+    for(i in seq_along(stage_per_treat_tot)[-length(seq_along(stage_per_treat_tot))]) {
+      writeData(wb, paste0(toupper(m),"-Stage&Treat"), names(stage_per_treat_tot)[i], startCol = 1, startRow = curr_row)
+      addStyle(wb, sheet = paste0(toupper(m),"-Stage&Treat"), createStyle(textDecoration = "bold", border = "TopBottomLeftRight", borderColour = "#999999", fontSize = 12, fontColour = "#cc0000"), rows = curr_row, cols = 1)
+      writeData(wb, paste0(toupper(m),"-Stage&Treat"), stage_per_treat_tot[[i]], startCol = 1, startRow = curr_row + 1, rowNames = TRUE, borders = "all", borderColour = "#999999",
+                headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+      curr_row <- curr_row + nrow(stage_per_treat_tot[[i]]) + 4
+    }
+    setColWidths(wb,sheet = paste0(toupper(m),"-Stage&Treat"),cols = 1:ncol(stage_per_treat_tot[[1]]), widths = "auto")
+    
+    # Year of diagnosis & Sites
+    writeData(wb,sheet = paste0(toupper(m),"-Diag&Site"), data_year_diag, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+    setColWidths(wb,sheet = paste0(toupper(m),"-Diag&Site"),cols = 1:ncol(data_year_diag), widths = "auto")
+    
+    # Core variables
+    writeData(wb,sheet = paste0(toupper(m),"-Core"), core, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+    setColWidths(wb,sheet = paste0(toupper(m),"-Core"),cols = 1:ncol(core), widths = "auto")
+  }
+  
+  core_pts <- rbind(core_pts, core_pts_m)
+  
+} else {
+  # create a new dataframe to count % of missing and % of missing+unknown
+  check_summary <- data.frame("var" = character(0), "var_lab" = character(0), "form" = character(0), "den" = integer(0), "perc_miss" = double(0), "perc_miss_unk" = double(0))
+  
+  ## Select variables with field type != descriptive, calculated or checkbox
+  metadata_tmp <- subset(metadata,!(field_type %in% c("descriptive","calc", "checkbox"))) %>%
+    # tolgo anche a01_id e tutte quelle del tipo *_dayunk
+    filter(!(field_name %in% c("a01_id", grep("(date)([[:graph:]]*)(_unk)", metadata$field_name, value = TRUE)))) %>%
+    # tolgo altre variabili per cui non devo controllare missing -------- INSERIRE QUI VARIABILI PER CUI NON SI VUOLE CHECK SU MISSING E UNKNOWN
+    filter(!(field_name %in% c("e03_ct", "e04_mri", "e05_us", "e06_fdgpet", "e07_pet", "e08_opticdig", "e09_ctpet", "e10_unkim", "e11_otherim",
+                               "e13_ct_neck", "e14_mri_neck", "e15_us_neck", "e16_fdgpet_neck", "e17_pet_neck", "e18_ctpet_neck", "e19_unkim_neck", "e20_otherim_neck",
+                               "e22_ct_m", "e23_mri_m", "e24_us_m", "e25_fdgpet_m", "e26_pet_m", "e27_ctpet_m", "e28_unkim_m", "e29_otherim_m")))
+  
+  for (i in 1:nrow(metadata_tmp)){
+    var_tmp = metadata_tmp$field_name[i]
+    form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                           grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                           grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+    expr_str = renderLogic(metadata_tmp$branching_logic[i])
+    if(!is.na(form_complete)){
+      if(is.na(expr_str))
+        ps_tmp <- subset(redcap_data, get(form_complete) == 1)
+      else
+        ps_tmp <- subset(redcap_data, get(form_complete) == 1 & eval(parse(text = expr_str)))
+    } else {
+      event <- case_when(substring(var_tmp,1,1) == "j" ~ "imaging_available",
+                         substring(var_tmp,1,1) == "k" ~ "tumor_specimen_available",
+                         substring(var_tmp,1,1) == "l" ~ "gene_test_expression_analysis")
+      
+      if(is.na(expr_str))
+        ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event)
+      else
+        ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
+    }
+    
+    if(nrow(ps_tmp) != 0){
+      check_summary <- getMissUnk(ps_tmp, var_tmp, check_summary)
+    }
+    
+    gc()
+  }
+  
+  ## Checkbox
+  metadata_tmp <- subset(metadata, field_type %in% c("checkbox"))
+  
+  for (i in 1:nrow(metadata_tmp)){
+    var_patt = metadata_tmp$field_name[i]
+    form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                           grep(paste0(substring(var_patt,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                           grep(paste0(substring(var_patt,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+    expr_str = renderLogic(metadata_tmp$branching_logic[i])
+    if(!is.na(form_complete)){
+      if(is.na(expr_str))
+        ps_tmp <- subset(redcap_data, get(form_complete) == 1)
+      else
+        ps_tmp <- subset(redcap_data, get(form_complete) == 1 & eval(parse(text = expr_str)))
+    } else {
+      event <- case_when(substring(var_patt,1,1) == "j" ~ "imaging_available",
+                         substring(var_patt,1,1) == "k" ~ "tumor_specimen_available",
+                         substring(var_patt,1,1) == "l" ~ "gene_test_expression_analysis")
+      
+      if(is.na(expr_str))
+        ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event)
+      else
+        ps_tmp <- subset(redcap_data, redcap_repeat_instrument == event & eval(parse(text = expr_str)))
+    }
+    
+    if(nrow(ps_tmp) != 0){
+      check_summary <- getMissUnkCheckbox(ps_tmp, var_patt, check_summary)
+    }
+    
+    gc()
+  }
+  
+  # Sort in alphabetic order and change columns names ----
+  check_summary <- check_summary[gtools::mixedorder(check_summary$var),] %>%
+    mutate(perc_miss = formattable::percent(perc_miss)) %>%
+    mutate(perc_miss_unk = formattable::percent(perc_miss_unk)) %>%
+    mutate(form = case_when(form == "preliminary" ~ "Preliminary",
+                            form == "demographic_life_style" ~ "Demographic & life style",
+                            form == "previous_cancer_gensyndrome" ~ "Previous cancer gen.syndrome",
+                            form == "cancer_under_study" ~ "Cancer under study",
+                            form == "staging_procedures_and_stage" ~ "Staging procedures and stage",
+                            form == "cancer_under_study_treatment" ~ "Cancer Under Study Treatment",
+                            form %in% grep("progressionrecurrencepersistent_disease", unique(metadata$form_name), value = TRUE) ~ "Progression/Recurrence/Persistent disease",
+                            form == "status_of_patient_at_fup" ~ "Status of patient at fup",
+                            form == "adverse_events" ~ "Adverse events",
+                            form == "imaging_available" ~ "Imaging available",
+                            form == "tumor_specimen_available" ~ "Tumor specimen available",
+                            form == "gene_test_expression_analysis" ~ "Gene test expression analysis")) %>%
+    select(-c("var")) %>%
+    mutate(var_lab = gsub("<.*?>", "", var_lab)) %>%
+    filter(var_lab != "Instrument status:")
+  
+  colnames(check_summary) <- c("Variable", "Form", "Denominator","% missing", "% missing + unknown")
+  
+  # COMPLETED PATIENTS ------
+  data_non_rep <- filter(redcap_data, redcap_event_name == "non_repeatable_arm_1")
+  # Instrument 1-6, 8 completed, all the 7s missing ----
+  pts_complete_1 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
+                                              if_all(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- data.frame("status" = "Complete",
+                              "description" = "Instrument 1-6, 8 completed, all the 7s missing",
+                              "n_patients" = nrow(pts_complete_1),
+                              "n_error" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id)),
+                              "perc" = nrow(filter(pts_complete_1, a01_id %in% check_failed$a01_id))/nrow(pts_complete_1))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first one completed and the others missing
+  pts_complete_2 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete"), ~ . == 1) &
+                                              if_all(c("g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first one completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_2),
+                                                        "n_error" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_2, a01_id %in% check_failed$a01_id))/nrow(pts_complete_2)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first two completed and the others missing
+  pts_complete_3 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete"), ~ . == 1) &
+                                              if_all(c("g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first two completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_3),
+                                                        "n_error" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_3, a01_id %in% check_failed$a01_id))/nrow(pts_complete_3)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first three completed and the others missing
+  pts_complete_4 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete"), ~ . == 1) &
+                                              if_all(c("g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first three completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_4),
+                                                        "n_error" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_4, a01_id %in% check_failed$a01_id))/nrow(pts_complete_4)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first four completed and the others missing
+  pts_complete_5 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete"), ~ . == 1) &
+                                              if_all(c("g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first four completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_5),
+                                                        "n_error" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_5, a01_id %in% check_failed$a01_id))/nrow(pts_complete_5)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first five completed and the others missing
+  pts_complete_6 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete"), ~ . == 1) &
+                                              if_all(c("g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first five completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_6),
+                                                        "n_error" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_6, a01_id %in% check_failed$a01_id))/nrow(pts_complete_6)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first six completed and the others missing
+  pts_complete_7 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete"), ~ . == 1) &
+                                              if_all(c("g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first six completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_7),
+                                                        "n_error" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_7, a01_id %in% check_failed$a01_id))/nrow(pts_complete_7)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first seven completed and the others missing
+  pts_complete_8 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete"), ~ . == 1) &
+                                              if_all(c("g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first seven completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_8),
+                                                        "n_error" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_8, a01_id %in% check_failed$a01_id))/nrow(pts_complete_8)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first eight completed and the others missing
+  pts_complete_9 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete"), ~ . == 1) &
+                                              if_all(c("g9_119_complete", "g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first eight completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_9),
+                                                        "n_error" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_9, a01_id %in% check_failed$a01_id))/nrow(pts_complete_9)))
+  
+  # Instrument 1-6, 8 completed and for all the Instruments 7  the first nine completed and the others missing
+  pts_complete_10 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete"), ~ . == 1) &
+                                               if_all(c("g10_119_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and for all the Instruments 7 the first nine completed and the others missing",
+                                                        "n_patients" = nrow(pts_complete_10),
+                                                        "n_error" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_10, a01_id %in% check_failed$a01_id))/nrow(pts_complete_10)))
+  
+  # Instrument 1-6, 8 completed and all the Instruments 7  are completed
+  pts_complete_11 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete", "g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 1))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Complete",
+                                                        "description" = "Instrument 1-6, 8 completed and all the Instruments 7  are completed",
+                                                        "n_patients" = nrow(pts_complete_11),
+                                                        "n_error" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_11, a01_id %in% check_failed$a01_id))/nrow(pts_complete_11)))
+  
+  # Instrument 1-6, 8 completed and at least one instrument 7 incompleted
+  pts_complete_12 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 1) &
+                                               if_any(c("g1_119_complete", "g2_119_complete", "g3_119_complete", "g4_119_complete", "g5_119_complete", "g6_119_complete", "g7_119_complete", "g8_119_complete", "g9_119_complete", "g10_119_complete"), ~ . == 2))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
+                                                        "description" = "Instrument 1-6, 8 completed and at least one instrument 7 incompleted",
+                                                        "n_patients" = nrow(pts_complete_12),
+                                                        "n_error" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_12, a01_id %in% check_failed$a01_id))/nrow(pts_complete_12)))
+  
+  # At least one Instrument 1-6 incompleted and the others completed, 8 completed
+  pts_complete_13 <- data_non_rep %>% filter(if_all(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ !is.na(.)) &
+                                               if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ . == 2))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Incomplete",
+                                                        "description" = "At least one Instrument 1-6 or 8 incompleted (without missing)",
+                                                        "n_patients" = nrow(pts_complete_13),
+                                                        "n_error" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_13, a01_id %in% check_failed$a01_id))/nrow(pts_complete_13)))
+  
+  pts_complete_14 <- data_non_rep %>% filter(if_any(c("a07_complete", "b24_complete", "c28_complete", "d34_complete", "e57_complete", "f107_complete", "h06_complete"), ~ is.na(.)))
+  
+  case_complete <- rbind.fill(case_complete, data.frame("status" = "Missing",
+                                                        "description" = "At least one Instrument 1-6 or 8 missing",
+                                                        "n_patients" = nrow(pts_complete_14),
+                                                        "n_error" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id)),
+                                                        "perc" = nrow(filter(pts_complete_14, a01_id %in% check_failed$a01_id))/nrow(pts_complete_14)))
+  
+  
+  case_complete <- case_complete %>% mutate(n_error = ifelse(n_patients == 0, 0, n_error)) %>%
+    mutate(perc = ifelse(n_patients == 0, 0, perc)) %>%
+    mutate(perc = formattable::percent(perc))
+  
+  colnames(case_complete) <- c("Status", "Description","N pts", "N pts with at least one error", "% pts with at least one error over total n pts")
+  
+  # Staging & Treatments ---------
+  ###### N.B. per trattamento considerare sempre e solo clinical stage
+  data_trt <- redcap_data %>% subset(redcap_event_name == "non_repeatable_arm_1") %>%
+    mutate(treatment = case_when(
+      # SOLO UN TRATTAMENTO
+      f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) ~ "Only surgery",
+      f53_radio %in% c(1,2) & !(f01_surgery %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) ~ "Only radiotherapy",
+      f30_1_combofsystrt == 1 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only chemo",
+      f30_1_combofsystrt == 2 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only immuno",
+      f30_1_combofsystrt == 3 & !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f33_1_startdate_syst <= (d01_diagdate + 60) ~ "Only target",
+      # SOLO CONCOMITANTI
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
+        max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Concomitant chemo/radio",
+      # CHIRURGIA + altro
+      f01_surgery %in% c(1,2) & f55_radiosett == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f80_radiostartdate <= (f02_datesurg + 75) ~ "Surgery + postoperative radiotherapy",
+      f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f02_datesurg + 60) ~ "Surgery + adjuvant chemo",
+      f01_surgery %in% c(1,2) & f55_radiosett == 4 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f02_datesurg <= (d01_diagdate + 60) &
+        min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (f02_datesurg + 75) & max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 ~ "Surgery + Postoperative radio concomitant to chemotherapy",
+      # RADIO + altro
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 3 & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) & f80_radiostartdate <= (d01_diagdate + 60) & f33_1_startdate_syst <= (f81_radioendate + 45) ~ "Radio + adjuvant chemo",
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1 & f32_1_systsetting == 2 & f30_2_combofsystrt == 1 & f32_2_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) & min(c(f33_1_startdate_syst, f80_radiostartdate)) <= (d01_diagdate + 60) &
+        max(c(f33_1_startdate_syst, f80_radiostartdate)) <= min(c(f33_1_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_1_enddate_syst, f81_radioendate)) <= min(c(f34_1_enddate_syst, f81_radioendate)) + 7 &
+        f33_2_startdate_syst <= max(c(f33_1_startdate_syst, f80_radiostartdate)) + 45 ~ "Concomitant chemo/radio + adjuvant chemo",
+      # CHEMO + altro
+      !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1 & f30_2_combofsystrt == 2 & !(f29_3_systrt %in% c(1,2)) &
+        all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Chemo + immuno",
+      !(f01_surgery %in% c(1,2)) & f53_radio %in% c(1,2) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
+        !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
+        f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + radio",
+      f01_surgery %in% c(1,2) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 &
+        !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE)[-1], inherits = TRUE) %in% c(1,2)) &
+        f33_1_startdate_syst <= (d01_diagdate + 60) & f02_datesurg <= (f34_1_enddate_syst + 30) ~ "Neo-adjuvant chemo + surgery",
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & !(f29_3_systrt %in% c(1,2)) &
+        f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
+        max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 ~ "Neo-adjuvant chemo + concomitant radio/chemo",
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 6 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_2_systsetting == 2 & f30_3_combofsystrt == 1 & f32_3_systsetting == 3 &
+        f33_1_startdate_syst <= (d01_diagdate + 60) & min(c(f33_2_startdate_syst, f80_radiostartdate)) <= f34_1_enddate_syst + 30 &
+        max(c(f33_2_startdate_syst, f80_radiostartdate)) <= min(c(f33_2_startdate_syst, f80_radiostartdate)) + 7 & max(c(f34_2_enddate_syst, f81_radioendate)) <= min(c(f34_2_enddate_syst, f81_radioendate)) + 7 &
+        f33_3_startdate_syst <= max(c(f34_2_enddate_syst, f81_radioendate)) + 45 ~ "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant",
+      !(f01_surgery %in% c(1,2)) & f55_radiosett == 5 & f30_1_combofsystrt == 1  & f32_1_systsetting == 1 & f30_2_combofsystrt == 1  & f32_1_systsetting == 3 & !(f29_3_systrt %in% c(1,2)) &
+        f33_1_startdate_syst <= (d01_diagdate + 60) & f80_radiostartdate <= f34_1_enddate_syst + 30 &
+        f33_2_startdate_syst <= f81_radioendate + 45 ~ "Neo-adjuvant chemo + radio + chemo adjuvant",
+      # IMMUNO + altro
+      !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 3 & !(f29_3_systrt %in% c(1,2)) &
+        all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + target",
+      !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & f30_1_combofsystrt == 2 & f30_2_combofsystrt == 1 & !(f29_3_systrt %in% c(1,2)) &
+        all(c(f33_1_startdate_syst, f33_2_startdate_syst) <= (d01_diagdate + 60)) ~ "Immuno + chemo",
+      # SOLO CLINICAL TRIAL
+      !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) & f105_clinicltrial == 1 ~ "Clinical trial only",
+      # NON TRATTATO
+      !(f01_surgery %in% c(1,2)) & !(f53_radio %in% c(1,2)) & !any(mget(grep("f29_[[:digit:]]_systrt", colnames(redcap_data), value = TRUE), inherits = TRUE) %in% c(1,2)) & !(f99_othertrt %in% c(1,2)) ~ "No treatment",
+      # OTHER
+      TRUE ~ "Other")) %>%
+    select(c("a01_id", "d11_siterare", "d11_sitecomrar","e34_cstage", "treatment")) %>%
+    mutate(e34_cstage = case_when(e34_cstage == 999 ~ "Unknown",
+                                  e34_cstage == 1 ~ "0",
+                                  e34_cstage == 2 ~ "I",
+                                  e34_cstage == 3 ~ "II",
+                                  e34_cstage == 4 ~ "III",
+                                  e34_cstage == 5 ~ "IV",
+                                  e34_cstage == 6 ~ "IVA",
+                                  e34_cstage == 7 ~ "IVB",
+                                  e34_cstage == 8 ~ "IVC")) %>%
+    mutate(site = case_when(d11_siterare == 1 | d11_sitecomrar == 1 ~ "Nasal cavity and paranasal sinuses",
+                            d11_siterare == 2 | d11_sitecomrar == 2 ~ "Nasopharynx",
+                            d11_siterare %in% c(3,4,5) | d11_sitecomrar %in% c(3,4,5) ~ "Parotid gland; Submandibular gland; Sublingual gland",
+                            d11_siterare == 6 | d11_sitecomrar == 6 ~ "Middle ear",
+                            # !is.na(d11_siterare) | !is.na(d11_sitecomrar) ~ "Other",
+                            TRUE ~ "Other")) %>%
+    plyr::count(c("e34_cstage", "treatment", "site")) %>%
+    mutate(e34_cstage = ifelse(is.na(e34_cstage), "Stage not defined", e34_cstage))
+  
+  lev_stage <- factor(unique(data_trt$e34_cstage),
+                      levels = c("0", "I", "II", "III", "IV", "IVA", "IVB", "IVC", "Unknown", "Stage not defined"))
+  lev_trt <- factor(unique(data_trt$treatment),
+                    levels = c("Only surgery", "Only radiotherapy", "Only chemo", "Only immuno", "Only target", "Concomitant chemo/radio", "Surgery + postoperative radiotherapy", "Surgery + adjuvant chemo", "Surgery + Postoperative radio concomitant to chemotherapy", "Radio + adjuvant chemo", "Concomitant chemo/radio + adjuvant chemo", "Chemo + immuno",
+                               "Neo-adjuvant chemo + radio", "Neo-adjuvant chemo + surgery", "Neo-adjuvant chemo + concomitant radio/chemo", "Neo-adjuvant chemo + concomitant radio/chemo + chemo adjuvant", "Neo-adjuvant chemo + radio + chemo adjuvant", "Immuno + target", "Immuno + chemo", "Clinical trial only", "No treatment", "Other"))
+  lev_site <- factor(unique(data_trt$site),
+                     levels = c("Nasal cavity and paranasal sinuses", "Nasopharynx", "Parotid gland; Submandibular gland; Sublingual gland", "Middle ear", "Other"))
+  
+  stage_per_treat_tot <- setNames(vector("list", length(levels(lev_site))), levels(lev_site))
+  
+  for (k in names(stage_per_treat_tot)) {
+    data_trt_tmp <- data_trt %>%
+      filter(site == k)
+    
+    stage_per_treat <- setNames(data.frame(matrix(ncol = length(levels(lev_trt)), nrow = length(levels(lev_stage))), row.names = levels(lev_stage)), levels(lev_trt))
+    
+    for (i in 1:nrow(stage_per_treat)) {
+      stage <- rownames(stage_per_treat)[i]
+      for (j in 1:ncol(stage_per_treat)) {
+        trt <- colnames(stage_per_treat)[j]
+        stage_per_treat[i,j] <- ifelse(length(data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq']),
+                                       data_trt_tmp[which(data_trt_tmp$e34_cstage == stage & data_trt_tmp$treatment == trt), 'freq'], NA)
+      }
+    }
+    
+    stage_per_treat <- stage_per_treat %>%
+      mutate_all(~replace(., is.na(.), 0)) %>%
+      mutate(`No treatment` = `No treatment`  + `Clinical trial only`)
+    
+    stage_per_treat_tot[[k]] <- stage_per_treat
+    
+    gc()
+  }
+  
+  # Year of diagnosis & Sites
+  data_year_diag <- redcap_data %>% subset(redcap_event_name == "non_repeatable_arm_1") %>%
+    select(c("a01_id", "d01_diagdate", "d05_histo", "d11_siterare", "d11_sitecomrar")) %>%
+    mutate(site = ifelse(!is.na(d11_siterare), d11_siterare, d11_sitecomrar)) %>%
+    mutate(year_diag = format(d01_diagdate, format = '%Y')) %>%
+    plyr::count(c("year_diag", "site", "d05_histo")) 
+  
+  colnames(data_year_diag) <- c("Year of diagnosis", "Site", "Histology group", "Total")
+  
+  # Core variables --------
+  # remove patients with at least one missining or unknown core variable
+  core_pts <- redcap_data %>% subset(redcap_event_name == "non_repeatable_arm_1")
+  
+  for (i in 1:nrow(metadata_core)) {
+    var_tmp = metadata_core$field_name[i]
+    form_complete = ifelse(substring(var_tmp,1,1) == "g",
+                           grep(paste0(substring(var_tmp,1,2),"_[[:digit:]]+_complete"), metadata$field_name, value = TRUE),
+                           grep(paste0(substring(var_tmp,1,1),"[[:digit:]]+_complete"), metadata$field_name, value = TRUE))
+    expr_str = renderLogic(metadata_core$branching_logic[i])
+    if(metadata_core$field_type[i] != "checkbox"){
+      if(!is.na(expr_str)){
+        pts_tmp <- core_pts %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
+          subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
+      } else {
+        pts_tmp <- core_pts %>% subset(get(form_complete) == 1) %>%
+          subset(is.na(get(var_tmp)) | get(var_tmp) %in% c(999, 9999))
+      }
+    } else {
+      cond <- ifelse(length(grep(paste0(var_tmp, "___999"), colnames(core_pts))),
+                     'all(is.na(mget(grep(var_tmp, colnames(core_pts), value = TRUE), inherits = TRUE))) | get(grep(paste0(var_tmp, "___999"), colnames(core_pts), value = TRUE)) == 1',
+                     'all(is.na(mget(grep(var_tmp, colnames(core_pts), value = TRUE), inherits = TRUE)))')
+      if(!is.na(expr_str)){
+        pts_tmp <- core_pts %>% subset(get(form_complete) == 1 & eval(parse(text = expr_str))) %>%
+          subset(eval(parse(text = cond)))
+      } else {
+        pts_tmp <- core_pts %>% subset(get(form_complete) == 1) %>%
+          subset(eval(parse(text = cond)))
+      }
+    }
+    
+    core_pts <- subset(core_pts, !(a01_id %in% pts_tmp$a01_id))
+    
+    gc()
+  }
+  
+  # dataframe for summary report
+  core <- data.frame("patients" = length(unique(redcap_data$a01_id)), "pts_core" = nrow(core_pts),
+                     "perc" = formattable::percent(nrow(core_pts)/length(unique(redcap_data$a01_id))))
+  
+  colnames(core) <- c("N patients", "N patients with core variables", "% patients with core variables")
+  
+  # add worksheet
+  addWorksheet(wb, "Missing & Unknown")
+  addWorksheet(wb, "Completed patients")
+  addWorksheet(wb, "Staging & Treatments")
+  addWorksheet(wb, "Year of diagnosis & Sites")
+  addWorksheet(wb, "Core variables")
+  
+  # write data on worksheet
+  # Missing & Unknown
+  writeData(wb,sheet = "Missing & Unknown", check_summary, borders = "all", borderColour = "#999999",
+            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+  setColWidths(wb,sheet = "Missing & Unknown",cols = 1:ncol(check_summary), widths = "auto")
+  
+  # Completed patients
+  mergeCells(wb, "Completed patients", cols = 1, rows = 2:12)
+  mergeCells(wb, "Completed patients", cols = 1, rows = 13:14)
+  writeData(wb,sheet = "Completed patients", case_complete, borders = "all", borderColour = "#999999",
+            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+  setColWidths(wb,sheet = "Completed patients",cols = 1:ncol(case_complete), widths = "auto")
+  
+  # Staging & Treatments
+  curr_row <- 1
+  for(i in seq_along(stage_per_treat_tot)[-length(seq_along(stage_per_treat_tot))]) {
+    writeData(wb, "Staging & Treatments", names(stage_per_treat_tot)[i], startCol = 1, startRow = curr_row)
+    addStyle(wb, sheet = 'Staging & Treatments', createStyle(textDecoration = "bold", border = "TopBottomLeftRight", borderColour = "#999999", fontSize = 12, fontColour = "#cc0000"), rows = curr_row, cols = 1)
+    writeData(wb, "Staging & Treatments", stage_per_treat_tot[[i]], startCol = 1, startRow = curr_row + 1, rowNames = TRUE, borders = "all", borderColour = "#999999",
+              headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+    curr_row <- curr_row + nrow(stage_per_treat_tot[[i]]) + 4
+  }
+  setColWidths(wb,sheet = "Staging & Treatments",cols = 1:ncol(stage_per_treat_tot[[1]]), widths = "auto")
+  
+  # Year of diagnosis & Sites
+  writeData(wb,sheet = "Year of diagnosis & Sites", data_year_diag, borders = "all", borderColour = "#999999",
+            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+  setColWidths(wb,sheet = "Year of diagnosis & Sites",cols = 1:ncol(data_year_diag), widths = "auto")
+  
+  # Core variables
+  writeData(wb,sheet = "Core variables", core, borders = "all", borderColour = "#999999",
+            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
+  setColWidths(wb,sheet = "Core variables",cols = 1:ncol(core), widths = "auto")
 }
-
-# dataframe for summary report
-core <- data.frame("patients" = length(unique(redcap_data$a01_id)), "pts_core" = nrow(core_pts),
-                   "perc" = formattable::percent(nrow(core_pts)/length(unique(redcap_data$a01_id))))
-
-colnames(core) <- c("N patients", "N patients with core variables", "% patients with core variables")
 
 # Add a column 'core' to data:
 # 1 = core complete
@@ -3047,70 +3621,30 @@ colnames(core) <- c("N patients", "N patients with core variables", "% patients 
 redcap_data <- redcap_data %>% mutate(core = ifelse(a01_id %in% core_pts$a01_id, 1, 0))
 
 # write summary report
-file_name <- paste0(properties$id_centro,'-',id_analysis,'-QC-summary-', format(Sys.Date(), "%y%m%d"), '.xlsx')
-
-# create workbook
-wb <- createWorkbook()
-
-# add worksheet
-addWorksheet(wb, "Missing & Unknown")
-addWorksheet(wb, "Completed patients")
-addWorksheet(wb, "Staging & Treatments")
-addWorksheet(wb, "Core variables")
-
-# write data on worksheet
-# Missing & Unknown
-writeData(wb,sheet = "Missing & Unknown", check_summary, borders = "all", borderColour = "#999999",
-          headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
-setColWidths(wb,sheet = "Missing & Unknown",cols = 1:ncol(check_summary), widths = "auto")
-
-# Completed patients
-mergeCells(wb, "Completed patients", cols = 1, rows = 2:12)
-mergeCells(wb, "Completed patients", cols = 1, rows = 13:14)
-writeData(wb,sheet = "Completed patients", case_complete, borders = "all", borderColour = "#999999",
-          headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
-setColWidths(wb,sheet = "Completed patients",cols = 1:ncol(case_complete), widths = "auto")
-
-# Staging & Treatments
-curr_row <- 1
-for(i in seq_along(stage_per_treat_tot)[-length(seq_along(stage_per_treat_tot))]) {
-  writeData(wb, "Staging & Treatments", names(stage_per_treat_tot)[i], startCol = 1, startRow = curr_row)
-  addStyle(wb, sheet = 'Staging & Treatments', createStyle(textDecoration = "bold", border = "TopBottomLeftRight", borderColour = "#999999", fontSize = 12, fontColour = "#cc0000"), rows = curr_row, cols = 1)
-  writeData(wb, "Staging & Treatments", stage_per_treat_tot[[i]], startCol = 1, startRow = curr_row + 1, rowNames = TRUE, borders = "all", borderColour = "#999999",
-            headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
-  curr_row <- curr_row + nrow(stage_per_treat_tot[[i]]) + 4
-}
-setColWidths(wb,sheet = "Staging & Treatments",cols = 1:ncol(stage_per_treat_tot[[1]]), widths = "auto")
-
-# Core variables
-writeData(wb,sheet = "Core variables", core, borders = "all", borderColour = "#999999",
-          headerStyle = createStyle(border = c("top", "bottom", "left", "right"), borderColour = "#999999", textDecoration = "bold"))
-setColWidths(wb,sheet = "Core variables",cols = 1:ncol(core), widths = "auto")
+file_name <- paste0(properties$id_centro,'-',run_id,'-QC-summary-', format(Sys.Date(), "%y%m%d"), '.xlsx')
 
 # save to xlsx
 saveWorkbook(wb, file_name, overwrite = TRUE)
 
 # Copy in /data
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
+file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data", overwrite = TRUE)
 
-# Copy in /vantage6-starter_head_and_neck-user-vol/_data
-# file.copy(from = paste0("/opt/redcap_dq/environment/data/", file_name), "/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data")
-# file.rename(from = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", file_name),
-#             to = paste0("/var/lib/docker/volumes/vantage6-starter_head_and_neck-user-vol/_data/", ID_alg,"-QC-summary.xlsx"))
-system(paste0("datafile=\"/opt/redcap_dq/environment/data/", file_name,"\"
+# Copy in /vantage6-starter_head_and_neck-user-vol/_data and in /data
+system(paste0("echo \'datafile=\"/opt/redcap_dq/environment/data/", file_name,"\";
 if [[ \"$( docker ps -q -f name=vantage6-starter_head_and_neck-user)\" && \"$( docker container inspect -f '{{.State.Status}}' vantage6-starter_head_and_neck-user )\" == \"running\" ]]; then
-      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", ID_alg, "-QC-summary.xlsx
-fi"))
+      docker cp $datafile vantage6-starter_head_and_neck-user:/mnt/data/", run_id, "-QC-summary.xlsx
+fi;
+cp $datafile /data' | bash"))
 
 ############################################## PS- PASS ############################################## 
 # Salvo la lista dei pazienti che hanno passato i check in un csv (elimino tutti i pazienti che hanno almeno un check FAIL)
-ps_pass <- redcap_data %>%
-  filter(!(a01_id %in% check_failed$a01_id)) %>% #patients without errors
+ps_pass <- redcap_data %>% 
   select(c("a01_id", "redcap_event_name", "redcap_repeat_instrument", "redcap_repeat_instance", "a07_complete", "b24_complete","c28_complete",
-           "d34_complete", "e57_complete", "f107_complete", grep("g[[:digit:]]+_119_complete", colnames(redcap_data), value = TRUE), "h06_complete", "i07_complete", "core")) #save completeness status and core
+           "d34_complete", "e57_complete", "f107_complete", grep("g[[:digit:]]+_119_complete", colnames(redcap_data), value = TRUE), "h06_complete", "i07_complete", "core")) %>% #save completeness status and core
+  filter(!(a01_id %in% check_failed$a01_id)) #patients without errors
 
 file_name <- paste0(properties$id_centro,'-',id_analysis,'-pset-pass-', format(Sys.Date(), "%y%m%d"), '.csv')
 write.csv(ps_pass, file_name, row.names = FALSE, na = "")
 
-# Copy in /data
-file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data")
+# Copy in /opt/redcap_dq/environment/data
+file.copy(from = paste0("/opt/redcap_dq/environment/scripts/", file_name), "/opt/redcap_dq/environment/data", overwrite = TRUE)
